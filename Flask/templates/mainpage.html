@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+  <title>Lyrics Flask App</title>
+  </head>
+ 
+  <link rel="stylesheet" type="text/css" href="static/stylesheet/mainpage.css"
+  <body>
+
+    <div class="container">
+      <form method = "POST">
+      <div class="row">
+        <div class="col-25">
+          <label for="artist">Artist</label>
+        </div>
+        <div class="col-75">
+          <input type="text" id="artist" name="inputArtist" placeholder="The artist/band you want to search...">
+        </div>
+      </div>
+      <div class="row">
+        <div class="col-25">
+          <label for="name">Song</label>
+        </div>
+        <div class="col-75">
+          <input type="text" id="name" name="inputSong" placeholder="The song of the artist/band..">
+        </div>
+      </div>
+      <br>
+      <div class="row">
+        <input type="submit" value="Search">
+      </div>
+      </form>
+    </div>
+
+      <br>
+      <br>
+
+      {% if lyrics %}
+      <p><b>Lyrics (original language):</b></p>
+      {% endif %}
+      
+      {% for line in lyrics %}
+      <p>{{line}}</p>
+      {% endfor %}
+
+      <br>
+      {% if language %}
+      <p><b>Language:</b></p>
+      {% endif %}
+      <p>{{language}}</p>
+ 
+      <br>
+      {% if sentiment %}
+      <p><b>Sentiment:</b></p>
+      {% endif %}
+      <p>{{sentiment}}</p>
+
+      <br>
+      {% if topwords %}
+      <p><b>Top Words:</b></p>
+      {% endif %}
+      {% for tuple in topwords %}
+      <p>{{tuple}}</p>
+      {% endfor %}
+
+      <br>
+      {% if showImg %}
+        <img src="static/images/wordcloud.png" alt="wordcloud">
+      {% endif %}
+      
+      <footer class="footer">
+        <p>&copy; 2022 Oscar Iglesias Roqueiro</p>
+      </footer>
+ 
+    </div>
+  </body>
+</html>

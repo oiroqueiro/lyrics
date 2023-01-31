@@ -1,0 +1,362 @@
+#!/usr/bin/env python
+# coding: utf-8
+
+import pandas as pd
+
+import os
+
+import base64
+import requests
+import json
+
+from urllib.parse import urlencode
+from lyricsgenius import Genius
+
+import time
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.chrome.service import Service
+from webdriver_manager.chrome import ChromeDriverManager
+
+import fasttext as ft
+import translators as ts
+import translators.server as tss
+
+import textwrap
+
+from flair.models import TextClassifier
+from flair.data import Sentence
+
+import numpy as np
+
+import nltk
+from nltk.corpus import stopwords
+from nltk.stem import WordNetLemmatizer
+from nltk import word_tokenize
+from nltk.probability import FreqDist
+
+import string
+
+from matplotlib import pyplot as plt
+from wordcloud import WordCloud
+
+from pathlib import Path
+
+from PIL import Image
+from random import randint
+
+
+'''SECRETS'''
+def read_secrets():
+    keys={}
+    #keys_file = open('secrets.txt','r') #Had errors using this within a virtual environment
+    keys_file = os.fdopen(os.open('secrets.txt', os.O_RDONLY))
+    for line in keys_file:
+        (key, val) = line.replace('\n','').split("|")
+        keys[key] = val
+    return keys
+
+
+
+#SPOTIFY
+
+
+
+'''FUNCTION TO GET THE TOKEN FOR SPOTIFY API'''
+
+def get_token_spotify(key):
+    client_creds = f"{key['spotifyId']}:{key['spotifySecret']}"
+    client_creds_b64 = base64.b64encode(client_creds.encode())
+    
+    headers_token = {"Authorization":f"Basic {client_creds_b64.decode()}"}
+    data_token = {"grant_type":"client_credentials"}
+ 
+    return requests.post('https://accounts.spotify.com/api/token', data=data_token, headers=headers_token).json()['access_token']
+
+
+
+
+'''FUNCTION TO GET THE ID OF ONE ARTIST'''
+
+def get_artist_id_spotify(name):
+    response_token = get_token_spotify(read_secrets())
+
+    headers = {"Authorization":f"Bearer {response_token}"}
+    endpoint = 'https://api.spotify.com/v1/search'
+    data = urlencode({
+        "q": name,
+        "type": "artist"
+    })
+
+    lookup_url = f"{endpoint}?{data}"
+
+    request = requests.get(lookup_url, headers=headers)
+
+    return request.json()['artists']['items'][0]['id']
+
+
+
+'''FUNCTION TO GET THE TOP (5) SONGS OF ONE ARTIST'''
+
+def get_top_songs_artist_spotify(artistId, n_songs=5):
+    n_songs=(10 if (n_songs>10) else n_songs)
+    
+    response_token = get_token_spotify(read_secrets())
+    headers = {'Authorization': f'Bearer {response_token}',
+               'Content-Type': 'application/json'}
+
+    data = urlencode({
+        "market": "US"
+    })
+    endpoint = f"https://api.spotify.com/v1/artists/{get_artist_id_spotify(artistId)}/top-tracks"
+    lookup_url = f"{endpoint}?{data}"
+
+    request = requests.get(lookup_url, headers=headers)
+    
+    return [request.json()['tracks'][i]['name'] for i in range(n_songs) ]
+
+
+
+
+#GENIUS
+
+
+'''
+FUNCTION TO GET THE ACCESS TOKEN FOR GENIUS
+
+As I had a lot of problems to get the Access Token directly from the Genius API and from the library 
+lyricsgenius, I decided to use selenium to get the access token and then continue with lyricsgenius
+'''
+
+def get_token_genius(key):
+    
+    # Url
+    
+    params = urlencode({
+        "client_id": key['geniusId'],
+        "redirect_uri": key['geniusRedirectUri'],
+        "scope": "me",
+        "state": "2",
+        "response_type": "token"
+    })
+
+    endpoint = f"https://api.genius.com/oauth/authorize"
+    lookup_url = f"{endpoint}?{params}"
+
+    # open the website
+    
+    driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()))    
+    driver.get(lookup_url)
+    
+    
+    #Accept cookies
+
+    cookies = driver.find_element(By.XPATH,'//*[@id="onetrust-accept-btn-handler"]')
+    cookies.click()
+
+    time.sleep(1)
+
+    #Login
+
+    email='roque.ourense@gmail.com'
+    password='Roque76bis_'
+
+    signin = driver.find_element(By.XPATH,'//*[@id="main"]/div/div[2]/a[2]')
+    signin.click()
+
+    time.sleep(1)
+
+    email_box = driver.find_element(By.ID, "user_session_login") 
+
+    email_box.clear()
+
+    email_box.send_keys(email)
+
+    time.sleep(1)
+
+    pass_box = driver.find_element(By.ID, 'user_session_password') 
+
+    pass_box.clear()
+
+    pass_box.send_keys(password)
+
+    time.sleep(1)
+
+    login = driver.find_element(By.ID,'user_session_submit')
+    login.click()
+
+    time.sleep(1.5)
+
+    approve = driver.find_element(By.XPATH,'/html/body/div[4]/div[3]/form/input[6]')
+    approve.click()
+
+    url_callback = driver.current_url
+
+    return url_callback[url_callback.find('access_token=') + len('access_token='):url_callback.find('&state=')]
+
+
+
+#Lyrics
+
+
+
+'''
+FUNCTION TO TO DOWNLOAD UP TO 5 LYRICS (OF 10 SONGS) FROM GENIUS
+'''
+
+def get_lyrics_from_genius(artist, song_title):
+
+    genius = Genius(read_secrets()['geniusAccessToken'])
+
+    # Remove section headers (e.g. [Chorus]) from lyrics when searching
+    genius.remove_section_headers = True
+    genius.skip_non_songs = False
+    
+    song = genius.search_song(artist=artist, title=song_title)
+    #lyric = song.lyrics.split(song_title + ' Lyrics')[1].replace('\n',' ').split('Embed')[0].rstrip('0123456789').strip()
+    #lyric = [phrase+"<br>" for phrase in song.lyrics.split('\n')[1:]]#.split('Embed')[0].rstrip('0123456789').strip()
+    lyric = song.lyrics.split('\n')[1:]
+
+    return lyric
+    
+
+''''
+FUNCTION TO GET THE LANGUAGE(S) OF THE LYRICS    
+'''
+
+def fasttext_detect_language(text):
+    
+    # Load the pretrained model
+
+	#Usually use this line, but to upload to a free hosting, need to be the smaller
+    model = ft.load_model("data/fasttext_pretrained_model/lid.176.bin")
+    #model = ft.load_model("data/fasttext_pretrained_model/lid.176.ftz")
+
+    text = text.replace('\n', " ")
+    prediction = model.predict([text])
+
+    return prediction[0][0][0][-2:]
+
+
+'''
+FUNCTION TO TRANSLATE LYRICS OF ANY LANGUAGE TO ENGLISH
+'''
+
+def translate_lyrics(lyric):
+    
+    ts.translators_pool
+
+    lyrics_en = ''
+    
+    from_language = fasttext_detect_language(lyric)
+        
+    if (from_language == 'en'):
+        lyrics_en = lyric
+    else:   
+        if (len(lyric)>2000):
+            lyric_splited_en = []
+            lyric_splited = textwrap.wrap(lyric, 2000, break_long_words=False)
+            for line in lyric_splited:
+                lyric_splited_en.append(tss.google(line, from_language, 'en'))
+            lyrics_en = ' '.join(lyric_splited_en)
+        else:
+            try:
+                lyrics_en = tss.google(lyric, from_language, 'en')
+            except:
+                try:
+                    lyrics_en = ts.translate_text(lyric, from_language, 'en')
+                except:
+                    lyrics_en = lyric
+    return lyrics_en
+
+
+
+'''
+FUNCTION TO CALCULATE THE SENTIMENT OF ONE TEXT
+'''
+
+def calculate_sentiment(text):
+    classifier = TextClassifier.load('en-sentiment')
+
+    sentence = Sentence(text)
+    
+    classifier.predict(sentence)
+
+    if (sentence.labels[0].value=='NEGATIVE'):
+        sentiment = -sentence.labels[0].score
+    else:
+        sentiment = sentence.labels[0].score
+    
+    return sentiment
+
+
+'''
+FUNCTION TO CALCULATE THE MOST COMMON WORDS IN ONE TEXT
+'''
+
+def get_top_words(text):
+    nltk.download('punkt')
+    nltk.download('wordnet')
+    nltk.download('omw-1.4')
+
+    lyrics_clean = []
+        
+    wordnet_lemmatizer = WordNetLemmatizer()
+
+    stop_words = list(set(stopwords.words('english')))
+    stop_words.extend(['yeah','uh','myyyyyyyet','oh','ooh', 'im', 'dont', 'na', 'one', 'wan', 'cant', 'cause', 'youre', 'aint', 'gon', 'might', 'wont', 'ah', 'still', 'ive', 'em', 'hey', '’', 'without', 'thats', 'also', 'every', 'eh', 'nothing', 'ayy', 'id', 'another', 'ever', 'okay', 'til', 'oohooh', 'pa', 'u', 'everybody', 'ima', 'someone', 'around', 'ey', 'woah', 'maybe', 'two', 'already', 'ohoh', 'everything', 'nobody', 'really', 'bum', 'woo', 'ya', 'eheh', 'much', 'alright', 'somebody', 'huh', 'something', 'seem', 'as', 'didnt', 'there', 'tryna', 'else', 'mmm', '21', 'la', 'shes', 'ho', 'youve', 'ohohoh', 'youll', 'oohoohooh', 'nothin', 'buh', 'somethin', 'sometimes', 'ere', 'many', 'para', 'anyone', 'whats', 'rather', 'everyone', 'hahahahaha', 'whatever', 'since', 'whole', 'ahah', 'lil', 'yakayaka', 'wow', 'though', 'three', 'anything', 'yeahyeah', 'twenty', 'next', 'le', 'prr', 'hi', 'control', 'probably', 'sugar', 'bottle', 'straight', 'kun', 'pas', 'c', 'couldnt', 'yo', 'haha', 'apart', 'he', '40', 'tra', 'ahahah', 'tomorrow', 'doesnt', 'juda', 'ddu', 'along', 'hundred', 'yall', 'youd', 'tá', 'eighteen', 'yet', 'vamo', 'outta', 'wasnt', 'ready', 'yah', 'isnt',  'gaga', 'brr', 'uah', 'mon', 'nah', 'million', 'may', 'de', 'ohohohoh', 'weve', 'pon', 'although', 'anymore', 'finally', 'yeh', 'uhhuh', 'hoo', 'someday', 'pal', 'um', 'ba', 'double', 'kinda', 'ago', 'somewhere', 'somo', 'wantin', 'teri', 'ten', 'hmm', 'five', 'vo—', 'behind', 'wuh', 'more—', 'wohoh', 'shouldnt', 'your—', 'thousand', 'hai', 'middle', 'theyre', 'ohohohohoh', 'ahahahah', '‘', 'ti', 'lala', 'pie', 'wouldnt', 'whenever', 'wave',  'everybodys', 'forty', 'guayar', 'tera', 'uhuh', 'brrt', 'g5', 'judaahah', 'h', 'doodoodoodoo', 'da', 'nanananananana', 'aw', 'twice', 'fifty', 'tu', 'dadadada', 'dundada', 'dadundada', 'lalalala', 'lalala', 'iii', 'suppose', 'shouldve', 'dada', 'ha', 'whered', 'opps', 'dynnanana', 'rarauw', 'hop', 'ki', 'rot', 'yuh', 'nine', 'thick', 'dumb', 'rudeboyz', 'tití', 'my—', 'mm',  'que', 'apa', 'vemo', 'whoa', 'tha', 'ak', 'dadada', 'thirtyfive', 'nono',   'kesariya', 'ishq', 'piya', 'jo', 'khuda', 'ohooh', 'oooh', 'theyll', 'everywhere', 'hah', 'woh', 'actin', 'lalalalalalala', 'byza', 'whoawhoawhoawhoawhoa', 'boo', '4', 'vroom', 'thatthatthat', 'instead', '\u200bnobody', 'tarawill', 'downdown', 'somehow', 'half', 'alight', 'hahahaha', 'whyd', 'heh', 'baow', 'yandel', 'patrá', 'solo', 'here', 'doodoodoo', 'mi', 'ee', 'tata', 'xanny', 'chee', 'x2', 'grrt', 'arent', 'woulda', '내', 'danananananana', 'upon', 'youim', 'cel', 'vece', 'rabta', 'como', 'who', 'acura', 'hunnid', 'khudgarzi', 'wohi', 'quiero', 'una', 'en', 'eee', 'ohwoahwoah', 'engine', 'vemor', 'humacao', 'ferragamo', '네', 'brratatata', 'trratatata', 'ddudduddu',  '”', 'wetto', 'grey59', 'billion', 'hawaiiii', 'ratata', 'nahi', 'wahi', 'dumdumdum', 'dadadumdumdum', 'dadadumdum', 'onenight', 'toa', 'couldve', 'woahohoh', 'nanana', 'havent', 'quite', 'eheheh', 'plo', 'ohwoah', 'mix', 'jaun', 'hath', 'se', 'kuch', 'w', 'maybach',  'aaja', 'mwhen', 'yeaheh',  'ajá', 'chica', 'latinas', 'you—', 'usual', 'ahooh', 'simple', 'amall', 'ehoh', 'luis', 'r', '“', 'wohohohoh', 'iti', '100', 'í', 'hahaha', 'grr',  'whoo', 'itll', 'yaah', 'je', '6ix', 'nanananana', 'woohoo', '날아가', '나', '너를', '너는', '이',  'ohh', 'noti', 'ii', 'aaa', '6', 'eight', 'herehow', 'tre', 'bumbum', 'blamblam', 'manaun', 'ke', 'toh', 'tujh', 'ohohohohohoh', 'sususummertime',  'gwagen', 'kabira', 'jaa', 'faqeera', 'ja', 'kaisa', 'dekhe', 'goodbyeif', 'nio', 'test—', 'natti', 'oye', 'así', 'f', 'mustve', 'taba', 'dadida', 'hmmmm', 'rvssian', 'diddy', 'blp', 'pumpumpum', 'gaby',  'fifth', 'stepfifth', 'mе', 'mía', 'ultra', '간판', '내리고', '문', '잠가', 'dududun', 'dulululun', 'bada', 'denynynyny', 'sisiside', 'anytime', 'ol', 'down\u200b', 'agua', 'twelve', 'wohohoh', 'youi', 'tere', 'khaali', 'samaaya', 'x5', 'dadadum', 'ow', 'shoodoodoodoodoo', '\u200blrig', 'uoy', 'chimba', 'maluma', 'tt', 'mhm', 'lo', 'uhyeahyeahyeah', 'chingo', '1950s', 'chamaquita', 'thisll', 'a—', 'yeahyeahyeahyeah', 'ayo', 'pimp', 'inner', 'wherever',  'herei', 'bhi', 'jaisi', 'mujhko', 'youif'])
+    stop_words.extend(['mmmm', 'from…', 'dadadadadadada', 'lou', 'cubano', 'solitai', 'ugh', 'm', 'mainly', '505', 'sevenhour', 'fortyfiveminute', 'andar', 'v8', 'j', 'youtell', 'youhe', 'zúmbale', 'lalalatinas', 'estoy', 'buscando', 'muévelo', 'shoulda', 'woowoowoo', 'mai', 'punto', 'andyou', 'pr', 'marimba', 'elsei', 'seventeen', 'void', 'anywhere', 'mil', 'uy', 'bellaco', 'pupupupum', 'gotti', 'aheh', 'mala', 'ía', 'rosa', 'andvemo', 'thathe', 'youthat', '자', 'thatll', '날', 'doodoo', 'thy', 'pro', 'maam', 'pic', 'thirty', 'wholl', 'happenedwohohoh', 'meand', 'riide', 'hulahula', 'hula', 'jewelerjeweler', 'skyyy', 'stopop', 'duko', 'lao', 'coroná', 'uhoh', 'able', 'mmmjum', 'cap', 'ra', 'bodyody', 'r'])
+        
+    new_text = text.translate(str.maketrans('', '', string.punctuation)).lower()
+        
+    word_tokens = nltk.tokenize.word_tokenize(new_text) 
+
+    for word in word_tokens: 
+        if word not in stop_words: 
+            lyrics_clean.append(word) 
+
+    lemma_words = []
+
+    for word in lyrics_clean:
+        word1 = wordnet_lemmatizer.lemmatize(word, pos = "n") #nouns
+        word2 = wordnet_lemmatizer.lemmatize(word1, pos = "v") #verbs
+        word3 = wordnet_lemmatizer.lemmatize(word2, pos = ("a")) #adjectives
+        lemma_words.append(word3)
+
+    #find the frequency of words
+    fdist = FreqDist(lemma_words)
+
+    return fdist.most_common(50)
+
+
+'''
+FUNCTION TO GENERATE A WORD CLOUD WITH A TEXT
+
+'''
+
+def get_word_cloud(text_list):
+    #Convert word list to a single string
+    clean_words_string = " ".join([tup[0] for tup in text_list])
+
+    #generating the wordcloud with a shape
+
+    shape_list=os.listdir(Path('data/shapes/'))
+                
+    image_route=f"data/shapes/{shape_list[randint(0,len(shape_list))-1]}"              
+    mask = np.array(Image.open(Path(image_route)))
+
+    wordcloud = WordCloud(max_font_size=50, max_words=50, background_color="white", mask=mask, contour_color='#023075',contour_width=3).generate(clean_words_string)
+
+    #plot the wordcloud
+    plt.figure(figsize = (6, 6))
+    plt.imshow(wordcloud)
+
+    #to remove the axis value
+    plt.axis("off")
+    #plt.show()
+    plt.savefig('static/images//wordcloud.png')
+
+    return 1
+
+
+
